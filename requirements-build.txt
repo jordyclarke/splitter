@@ -1,0 +1,3 @@
+# Build-time only (GitHub Actions / local Windows build)
+-r requirements.txt
+pyinstaller>=6.0.0

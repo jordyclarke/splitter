@@ -1,0 +1,29 @@
+# Secrets
+env/.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller
+build/
+dist/
+release/
+
+# Local dev / test artefacts
+test_run/
+analysis_pages/
+POD_System/
+*.pdf
+*.json
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Accidental path artifacts from old Windows config
+C:/

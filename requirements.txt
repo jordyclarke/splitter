@@ -1,0 +1,9 @@
+# POD Batch Splitter — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+watchdog>=4.0.0
+PyMuPDF>=1.24.0
+pyzbar>=0.1.9
+pytesseract>=0.3.13
+Pillow>=10.0.0
+requests>=2.31.0
