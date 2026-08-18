@@ -40,6 +40,7 @@ jobs:
           Copy-Item -Recurse -Force dist/POD_Splitter/* $release/
           Copy-Item -Force "packaging/Start POD Splitter.bat" $release/
           Copy-Item -Force packaging/README.txt $release/
+          Copy-Item -Force packaging/settings.ini.example $release/
           foreach ($dir in @("1_Input", "2_Output", "3_Archive", "4_Errors")) {
             New-Item -ItemType Directory -Force -Path "$release/POD_System/$dir" | Out-Null
           }

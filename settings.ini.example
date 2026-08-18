@@ -1,0 +1,12 @@
+[watch]
+# Kodak Capture Pro Searchable PDF output folder.
+# Edit this path to match your branch PC, then rename this file to settings.ini
+folder = C:\Users\PolokwaneAdmin\Documents\IMPORTANT DOCMENTS\SCANNING\POD SCANS\PODS
+# Watch dated subfolders (2026\08\180826\ etc.)
+recursive = true
+
+[processing]
+# false = leave batch PDFs in the Kodak folder (recommended — no Capture Pro changes)
+archive_source = false
+# false = only split new scans after the splitter starts (recommended for existing archives)
+process_existing = false

@@ -4,18 +4,20 @@ Splits Kodak scan batches into individual waybill PDFs named `{waybill}.pdf`.
 
 ## What it does
 
-1. Watches `POD_System/1_Input/` for multi-page PDF batches
+1. Watches a folder for multi-page PDF batches (default `POD_System/1_Input/`, or Kodak output via `settings.ini`)
 2. Detects waybill barcodes (LDLS, BIC, AFS, CLP, etc.)
 3. Appends invoice pages (no barcode) to the active waybill
 4. Saves `{waybill}.pdf` to `POD_System/2_Output/`
-5. Archives the original batch to `POD_System/3_Archive/`
+5. Optionally archives the original batch to `POD_System/3_Archive/`
 
 ## Branch deployment (no Python required)
 
 1. Download **POD_Splitter-Windows.zip** from [GitHub Actions](../../actions) or Releases
 2. Unzip to e.g. `D:\POD_Splitter\`
-3. Run **Start POD Splitter.bat**
-4. Point Kodak Capture Pro output to `POD_System\1_Input`
+3. Copy `settings.ini.example` → `settings.ini` and set your Kodak PODS folder
+4. Run **Start POD Splitter.bat** — leave the window open while scanning
+
+No Kodak Capture Pro changes needed when using `settings.ini` (recursive watch, originals left in place).
 
 See `packaging/README.txt` for branch instructions.
 
@@ -68,7 +70,21 @@ env/.env.example         Optional config (AI extraction disabled)
 
 ## Kodak Capture Pro
 
-| Setting | Value |
+**Recommended:** copy `settings.ini.example` to `settings.ini` and set:
+
+```ini
+[watch]
+folder = C:\Users\...\SCANNING\POD SCANS\PODS
+recursive = true
+
+[processing]
+archive_source = false
+process_existing = false
+```
+
+The splitter watches Kodak's existing dated output folders and leaves originals in place.
+
+| Setting | Value (legacy mode) |
 |---|---|
 | Output format | PDF |
 | Output folder | `…\POD_System\1_Input` |

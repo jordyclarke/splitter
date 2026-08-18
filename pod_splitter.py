@@ -1,8 +1,11 @@
 """
 POD Batch Splitter — Kodak Alaris s2050 / Kodak Capture Pro
 ==============================================================
-Watches POD_System/1_Input/ for multi-page PDF batches and saves
-individual waybill PDFs to POD_System/2_Output/ named {waybill}.pdf.
+Watches a folder for multi-page PDF batches and saves individual waybill
+PDFs to POD_System/2_Output/ named {waybill}.pdf.
+
+Default watch folder: POD_System/1_Input/
+Optional settings.ini: watch Kodak's existing output tree recursively.
 
 Development:  pip install -r requirements.txt && python pod_splitter.py
 Production:   run POD_Splitter.exe (built via GitHub Actions — see README.md)
@@ -11,6 +14,7 @@ Production:   run POD_Splitter.exe (built via GitHub Actions — see README.md)
 from __future__ import annotations
 
 import base64
+import configparser
 import io
 import json
 import logging
@@ -70,6 +74,8 @@ def _app_root() -> Path:
 APP_ROOT = _app_root()
 POD_ROOT = APP_ROOT / "POD_System"
 ENV_FILE = APP_ROOT / "env" / ".env"
+SETTINGS_FILE = APP_ROOT / "settings.ini"
+SETTINGS_EXAMPLE = APP_ROOT / "settings.ini.example"
 
 TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -97,6 +103,15 @@ DIRS = {
 }
 
 LOG_FILE = POD_ROOT / "processing_log.txt"
+PROCESSED_LOG = POD_ROOT / "processed_batches.txt"
+
+# Populated by load_settings() before the watcher starts.
+WATCH_DIR: Path = DIRS["input"]
+WATCH_RECURSIVE = False
+ARCHIVE_SOURCE = True
+PROCESS_EXISTING = True
+
+_processed_paths: set[str] = set()
 
 # Render resolution for barcode / OCR scanning (300 DPI ≈ scale 3 at 72 dpi base)
 RENDER_SCALE = 3.0
@@ -214,6 +229,121 @@ def ensure_directories() -> None:
     for name, path in DIRS.items():
         path.mkdir(parents=True, exist_ok=True)
         log.debug("Directory ready: %s", path)
+
+
+def load_settings() -> None:
+    """Load watch folder and processing options from settings.ini (if present)."""
+    global WATCH_DIR, WATCH_RECURSIVE, ARCHIVE_SOURCE, PROCESS_EXISTING
+
+    WATCH_DIR = DIRS["input"]
+    WATCH_RECURSIVE = False
+    ARCHIVE_SOURCE = True
+    PROCESS_EXISTING = True
+
+    if not SETTINGS_FILE.is_file():
+        log.info(
+            "No settings.ini — watching %s (flat). "
+            "Copy settings.ini.example to settings.ini to watch Kodak output.",
+            WATCH_DIR,
+        )
+        return
+
+    cfg = configparser.ConfigParser()
+    cfg.read(SETTINGS_FILE, encoding="utf-8")
+
+    if cfg.has_section("watch"):
+        folder = cfg.get("watch", "folder", fallback="").strip()
+        if folder:
+            watch_path = Path(folder).expanduser()
+            if not watch_path.is_absolute():
+                watch_path = (APP_ROOT / watch_path).resolve()
+            else:
+                watch_path = watch_path.resolve()
+            WATCH_DIR = watch_path
+        WATCH_RECURSIVE = cfg.getboolean("watch", "recursive", fallback=True)
+
+    if cfg.has_section("processing"):
+        ARCHIVE_SOURCE = cfg.getboolean("processing", "archive_source", fallback=False)
+        PROCESS_EXISTING = cfg.getboolean("processing", "process_existing", fallback=False)
+    elif WATCH_DIR.resolve() != DIRS["input"].resolve():
+        # External Kodak folder — leave originals in place by default.
+        ARCHIVE_SOURCE = False
+        PROCESS_EXISTING = False
+
+    if not WATCH_DIR.is_dir():
+        log.warning("Watch folder does not exist yet — creating: %s", WATCH_DIR)
+        WATCH_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_processed_log() -> None:
+    """Load paths of batches already split (avoids reprocessing on restart)."""
+    global _processed_paths
+    _processed_paths = set()
+    if not PROCESSED_LOG.is_file():
+        return
+    for line in PROCESSED_LOG.read_text(encoding="utf-8").splitlines():
+        entry = line.strip()
+        if entry:
+            _processed_paths.add(entry)
+
+
+def is_processed(path: Path) -> bool:
+    return str(path.resolve()) in _processed_paths
+
+
+def mark_processed(path: Path) -> None:
+    key = str(path.resolve())
+    if key in _processed_paths:
+        return
+    _processed_paths.add(key)
+    with PROCESSED_LOG.open("a", encoding="utf-8") as fh:
+        fh.write(f"{key}\n")
+
+
+def is_under_watch_dir(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(WATCH_DIR.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def iter_watch_pdfs() -> list[Path]:
+    """Return unprocessed PDFs currently under the watch folder."""
+    watch = WATCH_DIR.resolve()
+    if WATCH_RECURSIVE:
+        candidates = sorted(watch.rglob("*.pdf"))
+    else:
+        candidates = sorted(watch.glob("*.pdf"))
+    return [pdf for pdf in candidates if not is_processed(pdf)]
+
+
+def _error_dest_name(path: Path) -> str:
+    """Build a unique error filename when watching nested Kodak folders."""
+    if ARCHIVE_SOURCE or path.parent.resolve() == DIRS["input"].resolve():
+        return path.name
+    try:
+        rel = path.resolve().relative_to(WATCH_DIR.resolve())
+        return str(rel).replace("\\", "_").replace("/", "_")
+    except ValueError:
+        return path.name
+
+
+def _relocate_batch(path: Path, dest_dir: Path, label: str) -> None:
+    """Move or copy a batch to dest_dir depending on archive_source."""
+    dest = dest_dir / _error_dest_name(path)
+    if dest.exists():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = dest_dir / f"{dest.stem}_{ts}{dest.suffix}"
+    try:
+        if ARCHIVE_SOURCE:
+            shutil.move(str(path), str(dest))
+            log.info("%s moved: %s", label, dest.name)
+        else:
+            shutil.copy2(str(path), str(dest))
+            log.info("%s copied: %s (original left in Kodak folder)", label, dest.name)
+    except Exception as exc:
+        log.error("Could not %s %s: %s", "move" if ARCHIVE_SOURCE else "copy", path.name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1204,17 +1334,13 @@ def process_batch(input_path: Path) -> None:
     src_doc.close()
 
     # ------------------------------------------------------------------
-    # Housekeeping — move raw batch to archive
+    # Housekeeping — archive or leave source in Kodak folder
     # ------------------------------------------------------------------
-    archive_dest = DIRS["archive"] / input_path.name
-    if archive_dest.exists():
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        archive_dest = DIRS["archive"] / f"{input_path.stem}_{ts}{input_path.suffix}"
-    try:
-        shutil.move(str(input_path), str(archive_dest))
-        log.info("Batch archived: %s", archive_dest.name)
-    except Exception as exc:
-        log.error("Could not archive %s: %s", input_path.name, exc)
+    mark_processed(input_path)
+    if ARCHIVE_SOURCE:
+        _relocate_batch(input_path, DIRS["archive"], "Batch archived")
+    else:
+        log.info("Source batch left in place: %s", input_path)
 
     # ------------------------------------------------------------------
     # Summary report
@@ -1235,13 +1361,8 @@ def process_batch(input_path: Path) -> None:
 
 
 def _move_to_errors(path: Path) -> None:
-    """Move a whole unprocessable file to 4_Errors."""
-    dest = DIRS["errors"] / path.name
-    try:
-        shutil.move(str(path), str(dest))
-        log.error("Moved unprocessable file to errors: %s", dest.name)
-    except Exception as exc:
-        log.error("Could not move %s to errors: %s", path, exc)
+    """Move or copy a whole unprocessable file to 4_Errors."""
+    _relocate_batch(path, DIRS["errors"], "Unprocessable file")
 
 
 # ---------------------------------------------------------------------------
@@ -1249,7 +1370,7 @@ def _move_to_errors(path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 class BatchHandler(FileSystemEventHandler):
-    """Respond to new .pdf files appearing in the Input folder."""
+    """Respond to new .pdf files appearing in the watch folder."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1268,6 +1389,11 @@ class BatchHandler(FileSystemEventHandler):
 
     def _handle(self, path: Path) -> None:
         if path.suffix.lower() != ".pdf":
+            return
+        if not is_under_watch_dir(path):
+            return
+        if is_processed(path):
+            log.debug("Already processed, skipping: %s", path.name)
             return
         if str(path) in self._in_progress:
             return
@@ -1298,12 +1424,12 @@ class BatchHandler(FileSystemEventHandler):
 # ---------------------------------------------------------------------------
 
 def process_existing_files() -> None:
-    existing = sorted(DIRS["input"].glob("*.pdf"))
+    existing = iter_watch_pdfs()
     if not existing:
-        log.info("No pre-existing PDFs in input folder.")
+        log.info("No unprocessed PDFs in watch folder.")
         return
 
-    log.info("Found %d pre-existing PDF(s) in input folder — processing now.", len(existing))
+    log.info("Found %d unprocessed PDF(s) in watch folder — processing now.", len(existing))
     for pdf in existing:
         log.info("Processing pre-existing file: %s", pdf.name)
         try:
@@ -1333,6 +1459,8 @@ def main() -> None:
     log.info("POD folder: %s", POD_ROOT)
 
     ensure_directories()
+    load_settings()
+    load_processed_log()
     configure_tesseract()
 
     if EXTRACT_RECEIVER_FIELDS:
@@ -1341,15 +1469,20 @@ def main() -> None:
     global TESSERACT_AVAILABLE
     TESSERACT_AVAILABLE = os.path.isfile(TESSERACT_PATH)
 
-    # Process any files already in the input folder before starting the watcher
-    process_existing_files()
+    log.info("Watch folder   : %s", WATCH_DIR)
+    log.info("Watch recursive: %s", WATCH_RECURSIVE)
+    log.info("Archive source : %s", ARCHIVE_SOURCE)
+    log.info("Process existing: %s", PROCESS_EXISTING)
+
+    if PROCESS_EXISTING:
+        process_existing_files()
 
     # Start the watchdog observer
     event_handler = BatchHandler()
     observer = Observer()
-    observer.schedule(event_handler, str(DIRS["input"]), recursive=False)
+    observer.schedule(event_handler, str(WATCH_DIR), recursive=WATCH_RECURSIVE)
     observer.start()
-    log.info("Watching for new PDFs in: %s", DIRS["input"])
+    log.info("Watching for new PDFs in: %s", WATCH_DIR)
     log.info("Split PDFs saved to: %s", DIRS["output"])
     log.info("Press Ctrl+C to stop.\n")
 
@@ -1360,7 +1493,7 @@ def main() -> None:
                 log.error("Observer thread died — restarting.")
                 observer.stop()
                 observer = Observer()
-                observer.schedule(event_handler, str(DIRS["input"]), recursive=False)
+                observer.schedule(event_handler, str(WATCH_DIR), recursive=WATCH_RECURSIVE)
                 observer.start()
     except KeyboardInterrupt:
         log.info("Shutdown requested by user.")
