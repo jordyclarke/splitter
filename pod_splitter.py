@@ -124,15 +124,15 @@ FILE_SETTLE_CHECKS   = 4   # file must report the same size this many times
 # Characters that are illegal in a waybill number
 ILLEGAL_CHARS_RE = re.compile(r"[%#*\\\/:\"<>|?]")
 
-# Regex: a valid waybill must contain at least one alphanumeric character
-VALID_WAYBILL_RE = re.compile(r"[A-Za-z0-9]")
+# Regex: a valid waybill must contain at least one letter and one digit.
+WAYBILL_ID_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d).+$")
 
 # Barcode scan scales — wide CODE39 barcodes (e.g. LDLS) decode at scale 2.0 only.
 BARCODE_SCAN_SCALES = (3.0, 2.0, 2.5, 4.0)
 
 # Printed waybill numbers in the PDF text layer (fallback when pyzbar misses).
 WAYBILL_TEXT_RE = re.compile(
-    r"\b(?:LDLS|BIC|AFS|MET|SBA|CLP|INV|A10)\d+[A-Z0-9-]*\b",
+    r"\b(?:LDLS|DLS|BIC|AFS|MET|SBA|CLP|INV|A10|REV|SAV|SUZ)\d+[A-Z0-9-]*\b",
     re.I,
 )
 # Region (fraction of page height) to scan for barcodes / OCR fallback.
@@ -151,10 +151,13 @@ SIGNATURE_ONLY_NAME = "signiture"
 MIN_WAYBILL_LENGTH = 6
 
 # Known waybill prefixes seen in production samples.
-WAYBILL_PREFIXES = ("LDLS", "INV", "CLP", "A10", "AFS", "BIC", "MET", "SBA")
+WAYBILL_PREFIXES = ("LDLS", "DLS", "INV", "CLP", "A10", "AFS", "BIC", "MET", "SBA", "REV", "SAV", "SUZ")
 
 # ClipSa barcodes read as INV… but the true waybill number is CLP…
 INV_TO_CLP_RE = re.compile(r"^INV(?P<number>\d.*)$", re.I)
+
+# Dis-Chem delivery log sheets print DLS… but the canonical prefix is LDLS…
+DLS_TO_LDLS_RE = re.compile(r"^DLS(?P<number>\d.*)$", re.I)
 
 # AFS/BIC stickers have two barcodes: the short waybill at the top of the sticker
 # (e.g. AFS1451475, BIC26005499) and a longer package barcode below that appends
@@ -296,8 +299,16 @@ def mark_processed(path: Path) -> None:
     if key in _processed_paths:
         return
     _processed_paths.add(key)
-    with PROCESSED_LOG.open("a", encoding="utf-8") as fh:
-        fh.write(f"{key}\n")
+    try:
+        PROCESSED_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with PROCESSED_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(f"{key}\n")
+    except OSError as exc:
+        log.warning(
+            "Could not write processed log %s (tracking kept in memory this session): %s",
+            PROCESSED_LOG,
+            exc,
+        )
 
 
 def is_under_watch_dir(path: Path) -> bool:
@@ -403,12 +414,20 @@ def _normalise_waybill_number(waybill: str) -> str:
     """
     Apply supplier-specific waybill corrections after barcode scan.
     - INV00720608 → CLP00720608 (ClipSa invoice barcode)
+    - DLS926241 → LDLS926241 (Dis-Chem delivery log prefix)
     - AFS14514750001 → AFS1451475 (short AFS sticker, not package barcode)
     - BIC260054990001-0002 → BIC26005499 (short BIC sticker, not package barcode)
     """
     inv_match = INV_TO_CLP_RE.match(waybill)
     if inv_match:
         normalised = f"CLP{inv_match.group('number')}"
+        if normalised != waybill:
+            log.info("Waybill corrected: %s → %s", waybill, normalised)
+        return normalised
+
+    dls_match = DLS_TO_LDLS_RE.match(waybill)
+    if dls_match:
+        normalised = f"LDLS{dls_match.group('number')}"
         if normalised != waybill:
             log.info("Waybill corrected: %s → %s", waybill, normalised)
         return normalised
@@ -424,11 +443,19 @@ def _normalise_waybill_number(waybill: str) -> str:
     return waybill
 
 
+def _is_valid_waybill_id(value: str) -> bool:
+    """
+    Real waybill IDs always contain letters and digits (e.g. LDLS926241).
+    Reject name stickers (LAMOLA), pure numeric store codes (138879), and
+    long package tracking numbers (460096544394946449).
+    """
+    return bool(WAYBILL_ID_RE.match(value))
+
+
 def _sanitise_barcode(raw: str) -> Optional[str]:
     """
     Strip whitespace and illegal characters from a raw barcode string.
-    Returns the cleaned string if it ends with an alphanumeric character,
-    otherwise None.
+    Returns the cleaned string if it looks like a waybill ID, otherwise None.
     """
     cleaned = raw.strip()
     cleaned = ILLEGAL_CHARS_RE.sub("", cleaned)
@@ -437,19 +464,19 @@ def _sanitise_barcode(raw: str) -> Optional[str]:
     if not cleaned:
         return None
 
-    # Must end (and contain) at least one alphanumeric character
-    if not VALID_WAYBILL_RE.search(cleaned):
-        return None
-
     # Ensure the last character is alphanumeric
     if not cleaned[-1].isalnum():
         cleaned = cleaned.rstrip("".join(c for c in cleaned if not c.isalnum()))
         cleaned = cleaned.strip()
 
-    if cleaned and cleaned[-1].isalnum():
-        return _normalise_waybill_number(cleaned)
+    if not cleaned or not cleaned[-1].isalnum():
+        return None
 
-    return None
+    if not _is_valid_waybill_id(cleaned):
+        log.debug("Rejected non-waybill barcode: %r", cleaned)
+        return None
+
+    return _normalise_waybill_number(cleaned)
 
 
 def _pil_from_fitz_page(page: fitz.Page, scale: float = RENDER_SCALE) -> Image.Image:
@@ -511,6 +538,9 @@ def _score_waybill_candidate(value: str, rel_y: float, rel_h: float) -> float:
     Higher score = more likely to be the document waybill ID.
     """
     score = 0.0
+
+    if not _is_valid_waybill_id(value):
+        return -100.0
 
     if len(value) >= MIN_WAYBILL_LENGTH:
         score += 20
@@ -1175,16 +1205,23 @@ def wait_for_file_ready(path: Path) -> bool:
     Poll the file size every FILE_SETTLE_INTERVAL seconds.
     Return True only when the size has been stable for FILE_SETTLE_CHECKS
     consecutive readings, meaning the scanner has finished writing.
+    Kodak sometimes writes a temp file then renames it — allow brief disappearances.
     """
     log.info("Waiting for file to settle: %s", path.name)
     prev_size = -1
     stable_count = 0
+    missing_count = 0
 
     for attempt in range(FILE_SETTLE_CHECKS * 10):  # hard cap
         time.sleep(FILE_SETTLE_INTERVAL)
         try:
             current_size = path.stat().st_size
+            missing_count = 0
         except FileNotFoundError:
+            missing_count += 1
+            if missing_count <= 5:
+                log.debug("File temporarily missing (Kodak write/rename?): %s", path.name)
+                continue
             log.warning("File disappeared while waiting: %s", path)
             return False
 
