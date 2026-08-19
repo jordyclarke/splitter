@@ -8,5 +8,7 @@ recursive = true
 [processing]
 # false = leave batch PDFs in the Kodak folder (recommended — no Capture Pro changes)
 archive_source = false
-# false = only split new scans after the splitter starts (recommended for existing archives)
+# false = ignore PDFs already in Kodak folders (old manually-split files).
+#         Only split NEW batch PDFs created after the splitter starts.
+#         Required when switching from manual split to one-big-PDF output.
 process_existing = false

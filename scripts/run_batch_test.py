@@ -78,8 +78,8 @@ def main() -> None:
     print("\nRunning split pipeline...")
     ps.process_batch(batch_path)
 
-    outputs = sorted(ps.DIRS["output"].glob("*.pdf"))
-    print(f"\nDone. {len(outputs)} waybill PDF(s) in {ps.DIRS['output']}:")
+    outputs = sorted(ps.DIRS["output"].rglob("*.pdf"))
+    print(f"\nDone. {len(outputs)} waybill PDF(s) under {ps.DIRS['output']}:")
     for pdf in outputs:
         doc = fitz.open(pdf)
         pages = doc.page_count

@@ -6,7 +6,7 @@ echo ============================================================
 echo  POD Batch Splitter
 echo ============================================================
 echo  App folder : %~dp0
-echo  Output from: %~dp0POD_System\2_Output
+echo  Output from: %~dp0POD_System\2_Output\  (one folder per batch)
 echo.
 if exist "%~dp0settings.ini" (
   echo  Using watch folder from settings.ini

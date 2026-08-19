@@ -7,7 +7,7 @@ Splits Kodak scan batches into individual waybill PDFs named `{waybill}.pdf`.
 1. Watches a folder for multi-page PDF batches (default `POD_System/1_Input/`, or Kodak output via `settings.ini`)
 2. Detects waybill barcodes (LDLS, BIC, AFS, CLP, etc.)
 3. Appends invoice pages (no barcode) to the active waybill
-4. Saves `{waybill}.pdf` to `POD_System/2_Output/`
+4. Saves `{waybill}.pdf` to `POD_System/2_Output/{batch_name}/`
 5. Optionally archives the original batch to `POD_System/3_Archive/`
 
 ## Branch deployment (no Python required)

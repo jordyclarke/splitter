@@ -2,7 +2,7 @@
 POD Batch Splitter — Kodak Alaris s2050 / Kodak Capture Pro
 ==============================================================
 Watches a folder for multi-page PDF batches and saves individual waybill
-PDFs to POD_System/2_Output/ named {waybill}.pdf.
+PDFs to POD_System/2_Output/{batch_name}/ named {waybill}.pdf.
 
 Default watch folder: POD_System/1_Input/
 Optional settings.ini: watch Kodak's existing output tree recursively.
@@ -158,6 +158,19 @@ INV_TO_CLP_RE = re.compile(r"^INV(?P<number>\d.*)$", re.I)
 
 # Dis-Chem delivery log sheets print DLS… but the canonical prefix is LDLS…
 DLS_TO_LDLS_RE = re.compile(r"^DLS(?P<number>\d.*)$", re.I)
+
+# DSV ECO stickers — waybill is the printed Document / Consignment number, not the barcode.
+DSV_MARKER_RE = re.compile(r"\bDSV\b", re.I)
+DSV_DOCUMENT_RE = re.compile(
+    r"Document\s*:?\s*(?P<doc>\d{8,12})\b",
+    re.I,
+)
+DSV_CONSIGNMENT_RE = re.compile(
+    r"Consignment\s*:?\s*(?P<con>\d{8,12})\b",
+    re.I,
+)
+DSV_DOC_MIN_LEN = 8
+DSV_DOC_MAX_LEN = 12
 
 # AFS/BIC stickers have two barcodes: the short waybill at the top of the sticker
 # (e.g. AFS1451475, BIC26005499) and a longer package barcode below that appends
@@ -443,6 +456,72 @@ def _normalise_waybill_number(waybill: str) -> str:
     return waybill
 
 
+def _extract_dsv_document(text: str) -> Optional[str]:
+    """
+    Read the waybill from a DSV sticker's printed Document / Consignment field.
+    The linear barcode on DSV labels is not the waybill ID.
+    """
+    if not DSV_MARKER_RE.search(text):
+        return None
+
+    doc_match = DSV_DOCUMENT_RE.search(text)
+    if doc_match:
+        return doc_match.group("doc")
+
+    con_match = DSV_CONSIGNMENT_RE.search(text)
+    if con_match:
+        return con_match.group("con")
+
+    return None
+
+
+def _sanitise_dsv_document(raw: str) -> Optional[str]:
+    """Validate a DSV Document / Consignment number."""
+    cleaned = ILLEGAL_CHARS_RE.sub("", raw.strip())
+    if not cleaned.isdigit():
+        return None
+    if not (DSV_DOC_MIN_LEN <= len(cleaned) <= DSV_DOC_MAX_LEN):
+        return None
+    return cleaned
+
+
+def scan_dsv_sticker(page: fitz.Page) -> Optional[str]:
+    """Read DSV Document number from the PDF text layer."""
+    try:
+        doc = _extract_dsv_document(page.get_text())
+        if doc:
+            waybill = _sanitise_dsv_document(doc)
+            if waybill:
+                log.debug("DSV text layer hit: %r", waybill)
+                return waybill
+    except Exception as exc:
+        log.warning("DSV text scan error: %s", exc)
+    return None
+
+
+def scan_dsv_ocr(page: fitz.Page) -> Optional[str]:
+    """OCR fallback for DSV stickers when the PDF text layer is empty."""
+    if not TESSERACT_AVAILABLE:
+        return None
+
+    try:
+        img = _pil_from_fitz_page(page, scale=OCR_RENDER_SCALE)
+        config = "--oem 3 --psm 6"
+
+        for variant in (img, _enhance_for_barcode(img)):
+            text = pytesseract.image_to_string(variant, config=config)
+            doc = _extract_dsv_document(text)
+            if doc:
+                waybill = _sanitise_dsv_document(doc)
+                if waybill:
+                    log.debug("DSV OCR hit: %r", waybill)
+                    return waybill
+    except Exception as exc:
+        log.warning("DSV OCR error: %s", exc)
+
+    return None
+
+
 def _is_valid_waybill_id(value: str) -> bool:
     """
     Real waybill IDs always contain letters and digits (e.g. LDLS926241).
@@ -720,6 +799,13 @@ def scan_ocr_fallback(page: fitz.Page) -> Optional[str]:
 
 def identify_waybill(page: fitz.Page) -> tuple[Optional[str], str]:
     """Steps 1–2: find barcode and identify the waybill number for a page."""
+    # DSV stickers — Document number is the waybill, not the barcode.
+    waybill = scan_dsv_sticker(page)
+    if waybill:
+        return waybill, "dsv"
+    waybill = scan_dsv_ocr(page)
+    if waybill:
+        return waybill, "dsv-ocr"
     waybill = scan_barcodes(page)
     if waybill:
         return waybill, "barcode"
@@ -1238,6 +1324,17 @@ def wait_for_file_ready(path: Path) -> bool:
     return False
 
 
+def batch_output_dir(input_path: Path) -> Path:
+    """Create a dedicated subfolder under 2_Output for one batch's split PDFs."""
+    base_name = ILLEGAL_CHARS_RE.sub("_", input_path.stem).strip("._ ") or "batch"
+    out_dir = DIRS["output"] / base_name
+    if out_dir.exists():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = DIRS["output"] / f"{base_name}_{ts}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
 # ---------------------------------------------------------------------------
 # Core splitting engine
 # ---------------------------------------------------------------------------
@@ -1254,6 +1351,9 @@ def process_batch(input_path: Path) -> None:
     log.info("Processing batch: %s", input_path.name)
     log.info("=" * 70)
 
+    batch_out_dir = batch_output_dir(input_path)
+    log.info("Batch output folder: %s", batch_out_dir)
+
     # Batch-level statistics
     total_pages       = 0
     saved_results: list[PODResult] = []
@@ -1266,10 +1366,10 @@ def process_batch(input_path: Path) -> None:
 
     def _save_active(waybill: str, doc: fitz.Document, pages: int) -> None:
         """Save the split PDF named after the waybill."""
-        out_path = DIRS["output"] / f"{waybill}.pdf"
+        out_path = batch_out_dir / f"{waybill}.pdf"
         if out_path.exists():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = DIRS["output"] / f"{waybill}_{timestamp}.pdf"
+            out_path = batch_out_dir / f"{waybill}_{timestamp}.pdf"
             log.warning("Duplicate waybill %s — saving as %s", waybill, out_path.name)
         try:
             doc.save(str(out_path), garbage=4, deflate=True)
@@ -1325,8 +1425,8 @@ def process_batch(input_path: Path) -> None:
 
             # Steps 1–2: find barcode and identify waybill
             waybill, source = identify_waybill(page)
-            if waybill and source == "ocr":
-                log.info("  Page %d: OCR fallback identified waybill %s", page_num, waybill)
+            if waybill and source in ("ocr", "dsv", "dsv-ocr"):
+                log.info("  Page %d: %s identified waybill %s", page_num, source, waybill)
 
             # ----------------------------------------------------------
             # State machine — step 3: determine document boundaries
@@ -1385,6 +1485,7 @@ def process_batch(input_path: Path) -> None:
     log.info("")
     log.info("─" * 70)
     log.info("BATCH COMPLETE: %s", input_path.name)
+    log.info("  Output folder : %s", batch_out_dir)
     log.info("  Total pages   : %d", total_pages)
     log.info("  Waybills saved: %d", len(saved_results))
     for result in saved_results:
@@ -1520,7 +1621,7 @@ def main() -> None:
     observer.schedule(event_handler, str(WATCH_DIR), recursive=WATCH_RECURSIVE)
     observer.start()
     log.info("Watching for new PDFs in: %s", WATCH_DIR)
-    log.info("Split PDFs saved to: %s", DIRS["output"])
+    log.info("Split PDFs saved under: %s (one subfolder per batch)", DIRS["output"])
     log.info("Press Ctrl+C to stop.\n")
 
     try:
