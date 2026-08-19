@@ -158,6 +158,7 @@ INV_TO_CLP_RE = re.compile(r"^INV(?P<number>\d.*)$", re.I)
 
 # DSV ECO stickers — waybill is the printed Document / Consignment number, not the barcode.
 DSV_MARKER_RE = re.compile(r"\bDSV\b", re.I)
+DSV_ECO_RE = re.compile(r"\bECO\b", re.I)
 DSV_DOCUMENT_RE = re.compile(
     r"Document\s*:?\s*(?P<doc>\d{8,12})\b",
     re.I,
@@ -445,21 +446,34 @@ def _normalise_waybill_number(waybill: str) -> str:
     return waybill
 
 
+def _normalize_dsv_ocr(text: str) -> str:
+    """Fix common scan/OCR misreads of the DSV logo on stickers."""
+    return (
+        text.replace("P5V", "DSV")
+        .replace("0SV", "DSV")
+        .replace("O5V", "DSV")
+        .replace("DSY", "DSV")
+    )
+
+
 def _extract_dsv_document(text: str) -> Optional[str]:
     """
     Read the waybill from a DSV sticker's printed Document / Consignment field.
     The linear barcode on DSV labels is not the waybill ID.
     """
-    if not DSV_MARKER_RE.search(text):
-        return None
-
     doc_match = DSV_DOCUMENT_RE.search(text)
-    if doc_match:
+    con_match = DSV_CONSIGNMENT_RE.search(text)
+
+    # Strongest signal: DSV stickers print the same number for Document and Consignment.
+    if doc_match and con_match and doc_match.group("doc") == con_match.group("con"):
         return doc_match.group("doc")
 
-    con_match = DSV_CONSIGNMENT_RE.search(text)
-    if con_match:
-        return con_match.group("con")
+    normalized = _normalize_dsv_ocr(text)
+    if DSV_MARKER_RE.search(normalized) or DSV_ECO_RE.search(text):
+        if doc_match:
+            return doc_match.group("doc")
+        if con_match:
+            return con_match.group("con")
 
     return None
 
