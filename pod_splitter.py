@@ -156,9 +156,6 @@ WAYBILL_PREFIXES = ("LDLS", "DLS", "INV", "CLP", "A10", "AFS", "BIC", "MET", "SB
 # ClipSa barcodes read as INV… but the true waybill number is CLP…
 INV_TO_CLP_RE = re.compile(r"^INV(?P<number>\d.*)$", re.I)
 
-# Dis-Chem delivery log sheets print DLS… but the canonical prefix is LDLS…
-DLS_TO_LDLS_RE = re.compile(r"^DLS(?P<number>\d.*)$", re.I)
-
 # DSV ECO stickers — waybill is the printed Document / Consignment number, not the barcode.
 DSV_MARKER_RE = re.compile(r"\bDSV\b", re.I)
 DSV_DOCUMENT_RE = re.compile(
@@ -427,20 +424,12 @@ def _normalise_waybill_number(waybill: str) -> str:
     """
     Apply supplier-specific waybill corrections after barcode scan.
     - INV00720608 → CLP00720608 (ClipSa invoice barcode)
-    - DLS926241 → LDLS926241 (Dis-Chem delivery log prefix)
     - AFS14514750001 → AFS1451475 (short AFS sticker, not package barcode)
     - BIC260054990001-0002 → BIC26005499 (short BIC sticker, not package barcode)
     """
     inv_match = INV_TO_CLP_RE.match(waybill)
     if inv_match:
         normalised = f"CLP{inv_match.group('number')}"
-        if normalised != waybill:
-            log.info("Waybill corrected: %s → %s", waybill, normalised)
-        return normalised
-
-    dls_match = DLS_TO_LDLS_RE.match(waybill)
-    if dls_match:
-        normalised = f"LDLS{dls_match.group('number')}"
         if normalised != waybill:
             log.info("Waybill corrected: %s → %s", waybill, normalised)
         return normalised
