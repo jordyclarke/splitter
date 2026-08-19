@@ -132,7 +132,12 @@ BARCODE_SCAN_SCALES = (3.0, 2.0, 2.5, 4.0)
 
 # Printed waybill numbers in the PDF text layer (fallback when pyzbar misses).
 WAYBILL_TEXT_RE = re.compile(
-    r"\b(?:LDLS|DLS|BIC|AFS|MET|SBA|CLP|INV|A10|REV|SAV|SUZ)\d+[A-Z0-9-]*\b",
+    r"\b(?:LDLS|DLS|BIC|AFS|MET|SBA|CLP|INV|A10|REV|SAV|SUZ|CC)\d+[A-Z0-9-]*\b",
+    re.I,
+)
+# Right Side Up courier sheets print an alpha reference next to Collection Date.
+COURIER_ALPHA_REF_RE = re.compile(
+    r"(?:Collection Date|Booking Date)\s*:?\s*(?P<ref>[A-Z]{10,20})\b",
     re.I,
 )
 # Region (fraction of page height) to scan for barcodes / OCR fallback.
@@ -150,8 +155,12 @@ SIGNATURE_ONLY_NAME = "signiture"
 # Ignore short numeric-only values (account numbers like 9100, 8346).
 MIN_WAYBILL_LENGTH = 6
 
+# Right Side Up / Suzuki master waybills can be letters-only (e.g. SUZKYLAKRAFTT).
+# Shorter alpha-only codes are usually name stickers (LAMOLA = 6, MNDIVHUWO = 9).
+MIN_LETTERS_ONLY_WAYBILL_LENGTH = 10
+
 # Known waybill prefixes seen in production samples.
-WAYBILL_PREFIXES = ("LDLS", "DLS", "INV", "CLP", "A10", "AFS", "BIC", "MET", "SBA", "REV", "SAV", "SUZ")
+WAYBILL_PREFIXES = ("LDLS", "DLS", "INV", "CLP", "A10", "AFS", "BIC", "MET", "SBA", "REV", "SAV", "SUZ", "CC")
 
 # ClipSa barcodes read as INV… but the true waybill number is CLP…
 INV_TO_CLP_RE = re.compile(r"^INV(?P<number>\d.*)$", re.I)
@@ -527,11 +536,13 @@ def scan_dsv_ocr(page: fitz.Page) -> Optional[str]:
 
 def _is_valid_waybill_id(value: str) -> bool:
     """
-    Real waybill IDs always contain letters and digits (e.g. LDLS926241).
-    Reject name stickers (LAMOLA), pure numeric store codes (138879), and
-    long package tracking numbers (460096544394946449).
+    Most waybill IDs contain letters and digits (e.g. LDLS926241, CC698920).
+    Some couriers use long letters-only master waybills (e.g. SUZKYLAKRAFTT).
+    Reject short alpha-only name stickers (LAMOLA) and pure numeric codes (138879).
     """
-    return bool(WAYBILL_ID_RE.match(value))
+    if WAYBILL_ID_RE.match(value):
+        return True
+    return value.isalpha() and len(value) >= MIN_LETTERS_ONLY_WAYBILL_LENGTH
 
 
 def _sanitise_barcode(raw: str) -> Optional[str]:
@@ -757,6 +768,11 @@ def scan_text_layer(page: fitz.Page) -> Optional[str]:
             waybill = _sanitise_barcode(match.group())
             if waybill and len(waybill) >= MIN_WAYBILL_LENGTH:
                 candidates.append((waybill, 0.08, 0.02))
+
+        for match in COURIER_ALPHA_REF_RE.finditer(text):
+            waybill = _sanitise_barcode(match.group("ref"))
+            if waybill:
+                candidates.append((waybill, 0.10, 0.02))
 
         waybill = _pick_best_waybill(candidates)
         if waybill:
